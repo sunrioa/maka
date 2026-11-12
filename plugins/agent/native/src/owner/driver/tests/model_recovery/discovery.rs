@@ -1396,8 +1396,18 @@ async fn discovery_plain_completion_fails_but_preserves_its_checkpoint() {
     f.close().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn discovery_releases_the_slot_after_an_invalid_worker_image() {
+#[test]
+fn discovery_releases_the_slot_after_an_invalid_worker_image() {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .thread_stack_size(16 * 1024 * 1024)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async { tokio::spawn(check_invalid_worker_image()).await.unwrap() });
+}
+
+async fn check_invalid_worker_image() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut f = Fixture::new(&listener).await;
     let client = f.rig.client.as_ref().unwrap();
