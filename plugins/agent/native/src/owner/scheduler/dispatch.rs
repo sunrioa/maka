@@ -350,7 +350,9 @@ impl Owner {
     ) -> Result<Option<Run>, String> {
         let active = plan.task.status == Status::Active;
         if matches!(fire.effect, ScheduledEffect::Discovery { .. }) {
-            return self.dispatch_discovery(fire, active, &plan.timezone).await;
+            return self
+                .dispatch_discovery(fire, active, &plan.timezone, plan.task.runs.first())
+                .await;
         }
         let Some(Approval::Execution { approval }) = &fire.authorization else {
             return Ok(Some(settlement(
@@ -458,6 +460,7 @@ impl Owner {
                         parent_session_id: Some(source_session.clone()),
                         backend: None,
                         compaction_prompt: None,
+                        applied_preset: None,
                         collaboration_mode: CollaborationMode::Agent,
                         tools: basis.allowed_tools.clone(),
                         title: fire.title.clone(),
