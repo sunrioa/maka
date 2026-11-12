@@ -1397,6 +1397,57 @@ async fn discovery_plain_completion_fails_but_preserves_its_checkpoint() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn discovery_releases_the_slot_after_an_invalid_worker_image() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut f = Fixture::new(&listener).await;
+    let client = f.rig.client.as_ref().unwrap();
+    let catalog = call(client, "settings", "connections", json!({"kind":"start"}))
+        .await
+        .unwrap();
+    let model = call(
+        client,
+        "settings",
+        "create",
+        json!({"expectedCatalogRevision":catalog["revision"],"connection":{
+            "slug":"discovery-image","name":"Discovery image fixture",
+            "provider":{"packageId":"maka.providers","entryId":"maka.providers","scope":"profile","name":"ollama"},
+            "configuration":{"baseUrl":f.boot.base_url},"enabled":true,"enabledModelIds":["llama3.2"],
+            "modelOverrides":{"llama3.2":{"codeMode":true,"vision":true,"apiProtocol":"openai-chat-completions"}}
+        }}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(model["kind"], "committed", "{model}");
+    f.model["connectionId"] = model["connection"]["connectionId"].clone();
+
+    let damaged = f.create("Damaged image investigation").await;
+    let following = f.create("Following investigation").await;
+    f.change(&damaged, "trigger_now").await;
+    let (mut socket, _) = next(&listener).await;
+    f.change(&following, "trigger_now").await;
+    let tail = "AQID".repeat(16_384);
+    tool(
+        &mut socket,
+        "exec",
+        json!({"code":format!("image('data:image/png;base64,{tail}');")}),
+    )
+    .await;
+    let first = f.settled(&damaged, 1).await;
+    assert_eq!(first["task"]["runs"][0]["outcome"], "failed", "{first}");
+    let (mut socket, body) = next(&listener).await;
+    assert!(body.to_string().contains("Following investigation"));
+    tool(
+        &mut socket,
+        "DiscoveryComplete",
+        json!({"kind":"no_report","note":"The next worker ran."}),
+    )
+    .await;
+    let second = f.settled(&following, 1).await;
+    assert_eq!(second["task"]["runs"][0]["outcome"], "ok", "{second}");
+    f.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn discovery_search_continues_past_an_empty_bounded_page() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut f = Fixture::new(&listener).await;
