@@ -30639,6 +30639,10 @@ export const contracts: {
                   approved: {
                     type: 'boolean',
                   },
+                  backgroundFollowup: {
+                    description: 'A Bot-created one-time discovery that no longer needs approval.',
+                    type: 'boolean',
+                  },
                   nextFireAt: {
                     type: ['integer', 'null'],
                     format: 'int64',
@@ -38401,6 +38405,10 @@ export const contracts: {
                     $ref: '#/$defs/Status',
                   },
                   approved: {
+                    type: 'boolean',
+                  },
+                  backgroundFollowup: {
+                    description: 'A Bot-created one-time discovery that no longer needs approval.',
                     type: 'boolean',
                   },
                   nextFireAt: {

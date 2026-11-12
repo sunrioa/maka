@@ -94,6 +94,8 @@ struct Job {
 struct Completed {
     // Older receipts can also contain a copy of the report.
     run: Run,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    report_generation: Option<uuid::Uuid>,
 }
 fn completed_key(fire: &str) -> String {
     format!(
@@ -101,9 +103,9 @@ fn completed_key(fire: &str) -> String {
         hex::encode(Sha256::digest(fire.as_bytes()))
     )
 }
-fn report_identity(job: &Job) -> String {
+pub(super) fn report_identity(fire_id: &str) -> String {
     hex::encode(Sha256::digest(
-        format!("discovery-report/{}", job.fire_id).as_bytes(),
+        format!("discovery-report/{fire_id}").as_bytes(),
     ))
 }
 fn authorization_revoked(authorized: &Result<(), String>) -> bool {
@@ -269,16 +271,38 @@ impl scheduler::Scheduler {
         Ok(records[0].revision)
     }
     async fn has_active_fire(&self, job: &Job) -> Result<bool, String> {
-        Ok(self.change_basis(&job.task_id).await?.is_some_and(|saved| {
-            saved.plan.task.status == maka_scheduler::task::Status::Active
-                && saved.plan.pending.as_ref().is_some_and(|fire| {
-                    fire.id == job.fire_id
-                        && matches!(
-                            fire.authorization,
-                            Some(scheduler::Approval::Discovery { .. })
-                        )
-                })
-        }))
+        let Some(saved) = self.change_basis(&job.task_id).await? else {
+            return Ok(false);
+        };
+        let Some(fire) = saved.plan.pending.as_ref().filter(|fire| {
+            saved.plan.task.status == maka_scheduler::task::Status::Active && fire.id == job.fire_id
+        }) else {
+            return Ok(false);
+        };
+        let Some(approval @ scheduler::Approval::Discovery { .. }) = &fire.authorization else {
+            return Ok(false);
+        };
+        match approval.followup_grant() {
+            Some(grant) => self.followup_is_current(grant).await,
+            None => Ok(true),
+        }
+    }
+
+    pub(super) async fn completed_report_generation(
+        &self,
+        fire: &str,
+    ) -> Result<Option<uuid::Uuid>, String> {
+        let record = self
+            .storage
+            .read(completed_key(fire))
+            .await
+            .map_err(reason)?;
+        record
+            .and_then(|record| record.data.value().cloned())
+            .map(serde_json::from_value::<Completed>)
+            .transpose()
+            .map(|completed| completed.and_then(|receipt| receipt.report_generation))
+            .map_err(reason)
     }
     pub(super) fn discovery_tool(self: &Arc<Self>) -> ToolRegistration {
         ToolRegistration {
@@ -377,7 +401,7 @@ impl Owner {
     async fn retract_discovery_report(&self, job: &Job) -> Result<(), String> {
         let _ordered = self.runs.ordered(&job.bot).await;
         let queue = self.durable.queue();
-        let identity = report_identity(job);
+        let identity = report_identity(&job.fire_id);
         if matches!(
             queue
                 .resolve_message(job.bot.clone(), format!("m_{identity}"))
@@ -520,6 +544,7 @@ impl Owner {
                     approval,
                     recall,
                     session_tools,
+                    ..
                 }
                 | scheduler::Approval::CancelledDiscovery {
                     approval,
@@ -586,7 +611,10 @@ impl Owner {
             || matches!(
                 self.durable
                     .queue()
-                    .resolve_message(job.bot.clone(), format!("m_{}", report_identity(&job)))
+                    .resolve_message(
+                        job.bot.clone(),
+                        format!("m_{}", report_identity(&job.fire_id))
+                    )
                     .await
                     .map_err(reason)?,
                 MessageResolution::Cancelled
@@ -867,7 +895,7 @@ impl Owner {
                     job.approval.target.workspace.clone(),
                     job.approval.target.binding,
                 );
-                let identity = report_identity(&job);
+                let identity = report_identity(&job.fire_id);
                 let record = records::outcome_id(&job)?;
                 let text = text.clone();
                 let notes = notes.clone();
@@ -944,11 +972,22 @@ impl Owner {
             run_id: job.execution.as_ref().map(|e| e.run_id),
         };
         let mut writes = self.scheduler.outcome_mutations(job, &run.outcome).await?;
+        let report_generation =
+            if outcome == Outcome::Ok && matches!(job.phase, Phase::Delivering { .. }) {
+                fire.authorization
+                    .as_ref()
+                    .and_then(scheduler::Approval::discovery_generation)
+            } else {
+                None
+            };
         writes.extend([
             mutation(
                 completed_key(&fire.id),
                 None,
-                &Completed { run: run.clone() },
+                &Completed {
+                    run: run.clone(),
+                    report_generation,
+                },
             )?,
             Mutation {
                 key: ACTIVE.into(),
